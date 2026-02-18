@@ -192,12 +192,29 @@ TEMPLATE_CLASSIFICATION_FUNCTION = [
 
 class LLMPipelineWizard:
     def __init__(self):
+        import os
         ai_config = AIConfig.load(config=get_repo_config().ai_config)
-        if ENABLE_OPEN_AI and ai_config.mode == AIMode.OPEN_AI:
+
+        # Determine effective mode:
+        # 1. Explicit ai_config.mode from metadata.yaml takes priority when its flag is enabled
+        # 2. Fall back to env-driven auto-detection so deployment without metadata.yaml works
+        effective_mode = ai_config.mode
+
+        # Auto-detect open_ai_compatible if OPENAI_BASE_URL env var is set
+        # and no explicit mode is configured in metadata.yaml
+        if (
+            ENABLE_OPEN_AI_COMPATIBLE
+            and os.getenv('OPENAI_BASE_URL')
+            and ai_config.mode == AIMode.OPEN_AI
+            and not ENABLE_OPEN_AI
+        ):
+            effective_mode = AIMode.OPEN_AI_COMPATIBLE
+
+        if ENABLE_OPEN_AI and effective_mode == AIMode.OPEN_AI:
             self.client = OpenAIClient(ai_config.open_ai_config)
-        elif ENABLE_OPEN_AI_COMPATIBLE and ai_config.mode == AIMode.OPEN_AI_COMPATIBLE:
+        elif ENABLE_OPEN_AI_COMPATIBLE and effective_mode == AIMode.OPEN_AI_COMPATIBLE:
             self.client = OpenAIClient(ai_config.open_ai_compatible_config)
-        elif ENABLE_HUGGING_FACE and ai_config.mode == AIMode.HUGGING_FACE:
+        elif ENABLE_HUGGING_FACE and effective_mode == AIMode.HUGGING_FACE:
             self.client = HuggingFaceClient(ai_config.hugging_face_config)
         else:
             raise Exception('AI Mode is not available. ENABLE_OPEN_AI: '
