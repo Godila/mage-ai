@@ -1,0 +1,44 @@
+# Production Dockerfile — builds Mage AI from this repository's source code
+# This includes the openai-compatible providers patch
+FROM python:3.10-bookworm
+
+LABEL description="Mage AI — production build with OpenAI-compatible providers support"
+LABEL maintainer="Godila"
+
+USER root
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+
+# ─── System packages ──────────────────────────────────────────────────────────
+RUN apt-get -y update && \
+    apt-get -y install --no-install-recommends \
+    curl \
+    git \
+    graphviz \
+    nfs-common \
+    postgresql-client \
+    unixodbc-dev \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+
+# ─── Python: base dependencies ────────────────────────────────────────────────
+COPY requirements.txt /tmp/requirements.txt
+RUN pip3 install --no-cache-dir -r /tmp/requirements.txt
+
+# ─── Copy source code ─────────────────────────────────────────────────────────
+WORKDIR /home/src
+COPY . /home/src/
+
+# ─── Install Mage AI from local source (our fork with patched providers) ──────
+RUN pip3 install --no-cache-dir -e ".[all]"
+
+# ─── Startup script ───────────────────────────────────────────────────────────
+COPY --chmod=0755 ./scripts/run_app.sh /app/run_app.sh
+
+# ─── Environment defaults ─────────────────────────────────────────────────────
+ENV PYTHONPATH="${PYTHONPATH}:/home/src"
+ENV MAGE_DATA_DIR="/home/src/mage_data"
+ENV USER_CODE_PATH="/home/src/mage_data/default_repo"
+
+EXPOSE 6789
+
+CMD ["/app/run_app.sh"]

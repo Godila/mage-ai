@@ -1,0 +1,103 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Mage AI — Production Docker Compose for Dokploy
+# Domain: data.haragy.top
+# Traefik SSL is managed by Dokploy automatically via Let's Encrypt
+#
+# HOW TO DEPLOY on Dokploy:
+#   1. Create new "Docker Compose" application in Dokploy UI
+#   2. Point it to this repository (GitHub: Godila/mage-ai)
+#   3. Set compose file to: docker-compose.prod.yml
+#   4. Add all variables from .env.example in the Dokploy "Environment" tab
+#   5. Click Deploy
+# ─────────────────────────────────────────────────────────────────────────────
+
+version: '3.9'
+
+services:
+
+  # ── PostgreSQL — persistent metadata & pipeline run storage ─────────────────
+  postgres:
+    image: postgres:15-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - mage-internal
+      - dokploy-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── Mage AI server ───────────────────────────────────────────────────────────
+  mage:
+    build:
+      context: .
+      dockerfile: Dockerfile.prod
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      # ── Core ────────────────────────────────────────────────────────────────
+      USER_CODE_PATH: ${USER_CODE_PATH:-/home/src/mage_data/default_repo}
+      MAGE_DATA_DIR: ${MAGE_DATA_DIR:-/home/src/mage_data}
+      ENV: ${ENV:-production}
+
+      # ── Database (PostgreSQL for metadata) ──────────────────────────────────
+      MAGE_DATABASE_CONNECTION_URL: postgresql+psycopg2://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+
+      # ── Authentication ──────────────────────────────────────────────────────
+      REQUIRE_USER_AUTHENTICATION: ${REQUIRE_USER_AUTHENTICATION:-1}
+      REQUIRE_USER_PERMISSIONS: ${REQUIRE_USER_PERMISSIONS:-0}
+      AUTHENTICATION_MODE: ${AUTHENTICATION_MODE:-LOCAL}
+
+      # ── AI providers ────────────────────────────────────────────────────────
+      ENABLE_OPEN_AI: ${ENABLE_OPEN_AI:-1}
+      ENABLE_OPEN_AI_COMPATIBLE: ${ENABLE_OPEN_AI_COMPATIBLE:-1}
+      ENABLE_HUGGING_FACE: ${ENABLE_HUGGING_FACE:-0}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-}
+      OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4o}
+
+      # ── Misc ────────────────────────────────────────────────────────────────
+      SERVER_VERBOSITY: ${SERVER_VERBOSITY:-WARNING}
+      MAX_NUMBER_OF_FILE_VERSIONS: ${MAX_NUMBER_OF_FILE_VERSIONS:-10}
+      SCHEDULER_TRIGGER_INTERVAL: ${SCHEDULER_TRIGGER_INTERVAL:-10}
+    volumes:
+      - mage_data:/home/src/mage_data
+    networks:
+      - mage-internal
+      - dokploy-network
+    labels:
+      # ── Traefik / Dokploy routing ────────────────────────────────────────────
+      - "traefik.enable=true"
+      - "traefik.http.routers.mage-haragy.rule=Host(`data.haragy.top`)"
+      - "traefik.http.routers.mage-haragy.entrypoints=websecure"
+      - "traefik.http.routers.mage-haragy.tls.certresolver=letsencrypt"
+      - "traefik.http.services.mage-haragy.loadbalancer.server.port=6789"
+      # Redirect HTTP → HTTPS
+      - "traefik.http.routers.mage-haragy-http.rule=Host(`data.haragy.top`)"
+      - "traefik.http.routers.mage-haragy-http.entrypoints=web"
+      - "traefik.http.routers.mage-haragy-http.middlewares=redirect-to-https"
+      - "traefik.http.middlewares.redirect-to-https.redirectscheme.scheme=https"
+      - "traefik.http.middlewares.redirect-to-https.redirectscheme.permanent=true"
+
+# ── Networks ──────────────────────────────────────────────────────────────────
+networks:
+  mage-internal:
+    driver: bridge
+  dokploy-network:
+    external: true   # managed by Dokploy / Traefik
+
+# ── Volumes ───────────────────────────────────────────────────────────────────
+volumes:
+  postgres_data:
+    driver: local
+  mage_data:
+    driver: local
