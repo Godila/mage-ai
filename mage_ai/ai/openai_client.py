@@ -120,20 +120,75 @@ class OpenAIClient(AIClient):
         self.openai_client = OpenAILib(**client_kwargs)
 
     @staticmethod
+    def __strip_thinking_tags(text: str) -> str:
+        """Remove <think>...</think> reasoning blocks emitted by some models (e.g. MiniMax)."""
+        import re
+        # Remove all <think>…</think> sections (greedy=False so we handle multiple blocks)
+        text = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL)
+        return text.strip()
+
+    @staticmethod
+    def __extract_last_json(text: str) -> dict:
+        """Return the *last* valid JSON object found in text.
+
+        Models sometimes emit an example JSON before the real answer.
+        We scan from the rightmost '}' backwards to find the outermost
+        valid object that belongs to the actual answer.
+        """
+        end = len(text) - 1
+        while end >= 0:
+            end = text.rfind('}', 0, end + 1)
+            if end == -1:
+                break
+            # Walk left to find the matching '{'
+            depth = 0
+            for i in range(end, -1, -1):
+                if text[i] == '}':
+                    depth += 1
+                elif text[i] == '{':
+                    depth -= 1
+                if depth == 0:
+                    candidate = text[i:end + 1]
+                    try:
+                        return json.loads(candidate)
+                    except json.JSONDecodeError:
+                        pass
+                    break
+            end -= 1  # try the next '}' to the left
+        raise json.JSONDecodeError("No valid JSON object found", text, 0)
+
+    @staticmethod
     def __classification_fallback_messages(messages):
-        """Append a plain-JSON instruction for providers that ignore tool_choice."""
-        return messages + [{
-            "role": "user",
-            "content": (
-                "Respond ONLY with a JSON object (no markdown, no explanation) "
-                "with exactly these keys:\n"
-                '  "BlockType": one of "data_loader", "data_exporter", "transformer"\n'
-                '  "BlockLanguage": one of "python", "sql", "r", "yaml", "markdown"\n'
-                '  "PipelineType": one of "python", "integration", "streaming"\n'
-                "Example: "
-                '{"BlockType": "data_loader", "BlockLanguage": "python", "PipelineType": "python"}'
-            ),
-        }]
+        """Replace the last user message with a structured JSON-only classification request.
+
+        The original block_description is preserved as context so the model
+        knows what to classify. The example is omitted to avoid the model
+        echoing it back as its answer.
+        """
+        # Extract the original block description from the first user message
+        original_content = next(
+            (m['content'] for m in messages if m.get('role') == 'user'), ''
+        )
+        return [
+            {
+                "role": "system",
+                "content": (
+                    "You are a code block classifier. "
+                    "You MUST respond with ONLY a single JSON object — "
+                    "no thinking, no explanation, no markdown fences. "
+                    'Keys: "BlockType" ("data_loader"|"data_exporter"|"transformer"), '
+                    '"BlockLanguage" ("python"|"sql"|"r"|"yaml"|"markdown"), '
+                    '"PipelineType" ("python"|"integration"|"streaming").'
+                ),
+            },
+            {
+                "role": "user",
+                "content": (
+                    f"Classify this block description:\n{original_content}\n\n"
+                    "Reply with ONLY the JSON object, nothing else."
+                ),
+            },
+        ]
 
     async def __chat_completion_request(self, messages):
         """Call chat completions API with tool use.
@@ -207,10 +262,15 @@ class OpenAIClient(AIClient):
         chain = LLMChain(llm=self.llm, prompt=filled_prompt)
         if is_json_response:
             resp = await chain.arun(variable_values)
-            # If the model response didn't start with
-            # '{' and end with '}' follwing in the JSON format,
-            # then we will add '{' and '}' to make it JSON format.
-            if not resp.startswith('{') and not resp.endswith('}'):
+            # Strip <think>...</think> reasoning blocks emitted by some models
+            resp = self.__strip_thinking_tags(resp)
+            # Try to extract the last valid JSON object from the response
+            try:
+                return self.__extract_last_json(resp)
+            except json.JSONDecodeError:
+                pass
+            # Fallback: wrap bare key:value pairs in braces
+            if not resp.startswith('{') or not resp.endswith('}'):
                 resp = f'{{{resp.strip()}}}'
             if resp:
                 try:
@@ -220,7 +280,8 @@ class OpenAIClient(AIClient):
                     return resp
             else:
                 return {}
-        return await chain.arun(variable_values)
+        resp = await chain.arun(variable_values)
+        return self.__strip_thinking_tags(resp)
 
     def __parse_argument_value(self, value: str) -> str:
         if value is None:
@@ -263,21 +324,27 @@ class OpenAIClient(AIClient):
 
         Used when the provider does not support function calling and returns
         a JSON object in message.content instead of a tool_call.
+
+        Handles:
+        - <think>...</think> reasoning blocks (MiniMax, DeepSeek-R1, etc.)
+        - Markdown code fences
+        - Multiple JSON objects in the text (picks the last valid one)
         """
-        # Strip markdown code fences if present
-        text = content.strip()
+        # 1. Remove reasoning/thinking blocks
+        text = self.__strip_thinking_tags(content)
+
+        # 2. Strip markdown code fences
         if text.startswith("```"):
             lines = text.splitlines()
-            text = "\n".join(lines[1:-1] if lines[-1].strip() == "```" else lines[1:])
+            # Drop the opening fence line and the closing fence line (if present)
+            inner = lines[1:]
+            if inner and inner[-1].strip().startswith("```"):
+                inner = inner[:-1]
+            text = "\n".join(inner).strip()
 
-        # Try to find a JSON object anywhere in the response
-        start = text.find('{')
-        end = text.rfind('}')
-        if start != -1 and end != -1:
-            text = text[start:end + 1]
-
+        # 3. Extract the last valid JSON object (model may echo an example first)
         try:
-            raw = json.loads(text)
+            raw = self.__extract_last_json(text)
         except json.JSONDecodeError as e:
             raise Exception(
                 f"Could not parse block classification from model content: {e}\n"
