@@ -4,8 +4,8 @@ from typing import Dict
 
 import openai
 from langchain.chains import LLMChain
-from langchain.llms import OpenAI
 from langchain.prompts import PromptTemplate
+from langchain_community.chat_models import ChatOpenAI
 from openai import OpenAI as OpenAILib
 
 from mage_ai.ai.ai_client import AIClient
@@ -101,11 +101,17 @@ class OpenAIClient(AIClient):
 
         openai.api_key = openai_api_key
 
-        # LangChain wrapper — supports openai_api_base for custom endpoints
-        llm_kwargs = dict(openai_api_key=openai_api_key, temperature=0)
+        # LangChain ChatOpenAI wrapper — uses /v1/chat/completions (supported by all providers)
+        # The legacy langchain.llms.OpenAI used /v1/completions which most compatible
+        # providers (MiniMax, Groq, Together AI, etc.) do NOT support → 404 error.
+        llm_kwargs = dict(
+            openai_api_key=openai_api_key,
+            model_name=self.model,
+            temperature=0,
+        )
         if base_url:
             llm_kwargs['openai_api_base'] = base_url
-        self.llm = OpenAI(**llm_kwargs)
+        self.llm = ChatOpenAI(**llm_kwargs)
 
         # Official OpenAI SDK — supports base_url for OpenAI-compatible providers
         client_kwargs = dict(api_key=openai_api_key)
